@@ -18,6 +18,7 @@
   License along with this library; if not, write to the Free Software
   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
+#ifdef ASYNCWEBSERVER_AUTHENTICATION
 #include "WebAuthentication.h"
 #include <libb64/cencode.h>
 #ifdef ESP32
@@ -233,3 +234,4 @@ bool checkDigestAuthentication(const char * header, const char * method, const c
   //os_printf("AUTH FAIL: password\n");
   return false;
 }
+#endif
