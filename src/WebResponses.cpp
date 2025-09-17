@@ -125,28 +125,28 @@ void AsyncWebServerResponse::addHeader(const String& name, const String& value){
 
 String AsyncWebServerResponse::_assembleHead(uint8_t version){
   if(version){
-    addHeader("Accept-Ranges","none");
+    addHeader(F("Accept-Ranges"),F("none"));
     if(_chunked)
-      addHeader("Transfer-Encoding","chunked");
+      addHeader(F("Transfer-Encoding"),F("chunked"));
   }
   String out = String();
   int bufSize = 300;
   char buf[bufSize];
 
-  snprintf(buf, bufSize, "HTTP/1.%d %d %s\r\n", version, _code, _responseCodeToString(_code));
+  snprintf_P(buf, bufSize, PSTR("HTTP/1.%d %d %s\r\n"), version, _code, _responseCodeToString(_code));
   out.concat(buf);
 
   if(_sendContentLength) {
-    snprintf(buf, bufSize, "Content-Length: %d\r\n", _contentLength);
+    snprintf_P(buf, bufSize, PSTR("Content-Length: %d\r\n"), _contentLength);
     out.concat(buf);
   }
   if(_contentType.length()) {
-    snprintf(buf, bufSize, "Content-Type: %s\r\n", _contentType.c_str());
+    snprintf_P(buf, bufSize, PSTR("Content-Type: %s\r\n"), _contentType.c_str());
     out.concat(buf);
   }
 
   for(const auto& header: _headers){
-    snprintf(buf, bufSize, "%s: %s\r\n", header->name().c_str(), header->value().c_str());
+    snprintf_P(buf, bufSize, PSTR("%s: %s\r\n"), header->name().c_str(), header->value().c_str());
     out.concat(buf);
   }
   _headers.free();
@@ -173,9 +173,9 @@ AsyncBasicResponse::AsyncBasicResponse(int code, const String& contentType, cons
   if(_content.length()){
     _contentLength = _content.length();
     if(!_contentType.length())
-      _contentType = "text/plain";
+      _contentType = F("text/plain");
   }
-  addHeader("Connection","close");
+  addHeader(F("Connection"),F("close"));
 }
 
 void AsyncBasicResponse::_respond(AsyncWebServerRequest *request){
@@ -255,7 +255,7 @@ AsyncAbstractResponse::AsyncAbstractResponse(AwsTemplateProcessor callback): _ca
 }
 
 void AsyncAbstractResponse::_respond(AsyncWebServerRequest *request){
-  addHeader("Connection","close");
+  addHeader(F("Connection"),F("close"));
   _head = _assembleHead(request->version());
   _state = RESPONSE_HEADERS;
   _ack(request, 0, 0);
@@ -396,7 +396,7 @@ size_t AsyncAbstractResponse::_fillBufferAndProcessTemplates(uint8_t* data, size
     // If closing placeholder is found:
     if(pTemplateEnd) {
       // prepare argument to callback
-      const size_t paramNameLength = std::min(sizeof(buf) - 1, (unsigned int)(pTemplateEnd - pTemplateStart - 1));
+      const size_t paramNameLength = std::min((size_t)(sizeof(buf) - 1), (size_t)(pTemplateEnd - pTemplateStart - 1));
       if(paramNameLength) {
         memcpy(buf, pTemplateStart + 1, paramNameLength);
         buf[paramNameLength] = 0;
@@ -483,25 +483,25 @@ AsyncFileResponse::~AsyncFileResponse(){
 }
 
 void AsyncFileResponse::_setContentType(const String& path){
-  if (path.endsWith(".html")) _contentType = "text/html";
-  else if (path.endsWith(".htm")) _contentType = "text/html";
-  else if (path.endsWith(".css")) _contentType = "text/css";
-  else if (path.endsWith(".json")) _contentType = "application/json";
-  else if (path.endsWith(".js")) _contentType = "application/javascript";
-  else if (path.endsWith(".png")) _contentType = "image/png";
-  else if (path.endsWith(".gif")) _contentType = "image/gif";
-  else if (path.endsWith(".jpg")) _contentType = "image/jpeg";
-  else if (path.endsWith(".ico")) _contentType = "image/x-icon";
-  else if (path.endsWith(".svg")) _contentType = "image/svg+xml";
-  else if (path.endsWith(".eot")) _contentType = "font/eot";
-  else if (path.endsWith(".woff")) _contentType = "font/woff";
-  else if (path.endsWith(".woff2")) _contentType = "font/woff2";
-  else if (path.endsWith(".ttf")) _contentType = "font/ttf";
-  else if (path.endsWith(".xml")) _contentType = "text/xml";
-  else if (path.endsWith(".pdf")) _contentType = "application/pdf";
-  else if (path.endsWith(".zip")) _contentType = "application/zip";
-  else if(path.endsWith(".gz")) _contentType = "application/x-gzip";
-  else _contentType = "text/plain";
+  if (path.endsWith(F(".html"))) _contentType = F("text/html");
+  else if (path.endsWith(F(".htm"))) _contentType = F("text/html");
+  else if (path.endsWith(F(".css"))) _contentType = F("text/css");
+  else if (path.endsWith(F(".json"))) _contentType = F("application/json");
+  else if (path.endsWith(F(".js"))) _contentType = F("application/javascript");
+  else if (path.endsWith(F(".png"))) _contentType = F("image/png");
+  else if (path.endsWith(F(".gif"))) _contentType = F("image/gif");
+  else if (path.endsWith(F(".jpg"))) _contentType = F("image/jpeg");
+  else if (path.endsWith(F(".ico"))) _contentType = F("image/x-icon");
+  else if (path.endsWith(F(".svg"))) _contentType = F("image/svg+xml");
+  else if (path.endsWith(F(".eot"))) _contentType = F("font/eot");
+  else if (path.endsWith(F(".woff"))) _contentType = F("font/woff");
+  else if (path.endsWith(F(".woff2"))) _contentType = F("font/woff2");
+  else if (path.endsWith(F(".ttf"))) _contentType = F("font/ttf");
+  else if (path.endsWith(F(".xml"))) _contentType = F("text/xml");
+  else if (path.endsWith(F(".pdf"))) _contentType = F("application/pdf");
+  else if (path.endsWith(F(".zip"))) _contentType = F("application/zip");
+  else if(path.endsWith(F(".gz"))) _contentType = F("application/x-gzip");
+  else _contentType = F("text/plain");
 }
 
 AsyncFileResponse::AsyncFileResponse(FS &fs, const String& path, const String& contentType, bool download, AwsTemplateProcessor callback): AsyncAbstractResponse(callback){
@@ -510,7 +510,7 @@ AsyncFileResponse::AsyncFileResponse(FS &fs, const String& path, const String& c
 
   if(!download && !fs.exists(_path) && fs.exists(_path+".gz")){
     _path = _path+".gz";
-    addHeader("Content-Encoding", "gzip");
+    addHeader(F("Content-Encoding"), F("gzip"));
     _callback = nullptr; // Unable to process zipped templates
     _sendContentLength = true;
     _chunked = false;
@@ -530,12 +530,12 @@ AsyncFileResponse::AsyncFileResponse(FS &fs, const String& path, const String& c
 
   if(download) {
     // set filename and force download
-    snprintf(buf, sizeof (buf), "attachment; filename=\"%s\"", filename);
+    snprintf_P(buf, sizeof (buf), PSTR("attachment; filename=\"%s\""), filename);
   } else {
     // set filename and force rendering
-    snprintf(buf, sizeof (buf), "inline; filename=\"%s\"", filename);
+    snprintf_P(buf, sizeof (buf), PSTR("inline; filename=\"%s\""), filename);
   }
-  addHeader("Content-Disposition", buf);
+  addHeader(F("Content-Disposition"), buf);
 }
 
 AsyncFileResponse::AsyncFileResponse(File content, const String& path, const String& contentType, bool download, AwsTemplateProcessor callback): AsyncAbstractResponse(callback){
@@ -543,7 +543,7 @@ AsyncFileResponse::AsyncFileResponse(File content, const String& path, const Str
   _path = path;
 
   if(!download && String(content.name()).endsWith(".gz") && !path.endsWith(".gz")){
-    addHeader("Content-Encoding", "gzip");
+    addHeader(F("Content-Encoding"), F("gzip"));
     _callback = nullptr; // Unable to process gzipped templates
     _sendContentLength = true;
     _chunked = false;
@@ -562,11 +562,11 @@ AsyncFileResponse::AsyncFileResponse(File content, const String& path, const Str
   char* filename = (char*)path.c_str() + filenameStart;
 
   if(download) {
-    snprintf(buf, sizeof (buf), "attachment; filename=\"%s\"", filename);
+    snprintf_P(buf, sizeof (buf), PSTR("attachment; filename=\"%s\""), filename);
   } else {
-    snprintf(buf, sizeof (buf), "inline; filename=\"%s\"", filename);
+    snprintf_P(buf, sizeof (buf), PSTR("inline; filename=\"%s\""), filename);
   }
-  addHeader("Content-Disposition", buf);
+  addHeader(F("Content-Disposition"), buf);
 }
 
 size_t AsyncFileResponse::_fillBuffer(uint8_t *data, size_t len){
