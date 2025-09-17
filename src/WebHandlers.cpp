@@ -64,7 +64,7 @@ AsyncStaticWebHandler& AsyncStaticWebHandler::setLastModified(const char* last_m
 
 AsyncStaticWebHandler& AsyncStaticWebHandler::setLastModified(struct tm* last_modified){
   char result[30];
-  strftime (result,30,"%a, %d %b %Y %H:%M:%S %Z", last_modified);
+  strftime(result, sizeof(result), PSTR("%a, %d %b %Y %H:%M:%S GMT"), last_modified);
   return setLastModified((const char *)result);
 }
 
@@ -90,10 +90,10 @@ bool AsyncStaticWebHandler::canHandle(AsyncWebServerRequest *request){
   if (_getFile(request)) {
     // We interested in "If-Modified-Since" header to check if file was modified
     if (_last_modified.length())
-      request->addInterestingHeader("If-Modified-Since");
+      request->addInterestingHeader(F("If-Modified-Since"));
 
     if(_cache_control.length())
-      request->addInterestingHeader("If-None-Match");
+      request->addInterestingHeader(F("If-None-Match"));
 
     DEBUGF("[AsyncStaticWebHandler::canHandle] TRUE\n");
     return true;
@@ -195,22 +195,22 @@ void AsyncStaticWebHandler::handleRequest(AsyncWebServerRequest *request)
 
   if (request->_tempFile == true) {
     String etag = String(request->_tempFile.size());
-    if (_last_modified.length() && _last_modified == request->header("If-Modified-Since")) {
+    if (_last_modified.length() && _last_modified == request->header(F("If-Modified-Since"))) {
       request->_tempFile.close();
       request->send(304); // Not modified
-    } else if (_cache_control.length() && request->hasHeader("If-None-Match") && request->header("If-None-Match").equals(etag)) {
+    } else if (_cache_control.length() && request->hasHeader(F("If-None-Match")) && request->header(F("If-None-Match")).equals(etag)) {
       request->_tempFile.close();
       AsyncWebServerResponse * response = new AsyncBasicResponse(304); // Not modified
-      response->addHeader("Cache-Control", _cache_control);
-      response->addHeader("ETag", etag);
+      response->addHeader(F("Cache-Control"), _cache_control);
+      response->addHeader(F("ETag"), etag);
       request->send(response);
     } else {
       AsyncWebServerResponse * response = new AsyncFileResponse(request->_tempFile, filename, String(), false, _callback);
       if (_last_modified.length())
-        response->addHeader("Last-Modified", _last_modified);
+        response->addHeader(F("Last-Modified"), _last_modified);
       if (_cache_control.length()){
-        response->addHeader("Cache-Control", _cache_control);
-        response->addHeader("ETag", etag);
+        response->addHeader(F("Cache-Control"), _cache_control);
+        response->addHeader(F("ETag"), etag);
       }
       request->send(response);
     }
