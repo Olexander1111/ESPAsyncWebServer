@@ -18,6 +18,7 @@
   License along with this library; if not, write to the Free Software
   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
+#ifdef ASYNCWEBSERVER_WEBSOCKET
 #include "Arduino.h"
 #include "AsyncWebSocket.h"
 
@@ -1292,3 +1293,4 @@ size_t AsyncWebSocketResponse::_ack(AsyncWebServerRequest *request, size_t len, 
   }
   return 0;
 }
+#endif /* ASYNCWEBSERVER_WEBSOCKET */
