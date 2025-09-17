@@ -36,9 +36,9 @@ static String generateEventMessage(const char *message, const char *event, uint3
   }
 
   if(event != NULL){
-    ev += "event: ";
+    ev += F("event: ");
     ev += String(event);
-    ev += "\r\n";
+    ev += F("\r\n");
   }
 
   if(message != NULL){
@@ -50,14 +50,13 @@ static String generateEventMessage(const char *message, const char *event, uint3
       char * nextR = strchr(lineStart, '\r');
       if(nextN == NULL && nextR == NULL){
         size_t llen = ((char *)message + messageLen) - lineStart;
-        char * ldata = (char *)malloc(llen+1);
+        std::unique_ptr<char[]> ldata(new char[llen + 1]);
         if(ldata != NULL){
           memcpy(ldata, lineStart, llen);
           ldata[llen] = 0;
-          ev += "data: ";
+          ev += F("data: ");
           ev += ldata;
-          ev += "\r\n\r\n";
-          free(ldata);
+          ev += F("\r\n\r\n");
         }
         lineStart = (char *)message + messageLen;
       } else {
@@ -85,18 +84,17 @@ static String generateEventMessage(const char *message, const char *event, uint3
         }
 
         size_t llen = lineEnd - lineStart;
-        char * ldata = (char *)malloc(llen+1);
+        std::unique_ptr<char[]> ldata(new char[llen + 1]);
         if(ldata != NULL){
           memcpy(ldata, lineStart, llen);
           ldata[llen] = 0;
-          ev += "data: ";
+          ev += F("data: ");
           ev += ldata;
-          ev += "\r\n";
-          free(ldata);
+          ev += F("\r\n");
         }
         lineStart = nextLine;
         if(lineStart == ((char *)message + messageLen))
-          ev += "\r\n";
+          ev += F("\r\n");
       }
     } while(lineStart < ((char *)message + messageLen));
   }
@@ -109,7 +107,8 @@ static String generateEventMessage(const char *message, const char *event, uint3
 AsyncEventSourceMessage::AsyncEventSourceMessage(const char * data, size_t len)
 : _data(nullptr), _len(len), _sent(0), _acked(0)
 {
-  _data = (uint8_t*)malloc(_len+1);
+  //_data = (uint8_t*)malloc(_len+1);
+  _data = new uint8_t[_len + 1];
   if(_data == nullptr){
     _len = 0;
   } else {
@@ -120,7 +119,8 @@ AsyncEventSourceMessage::AsyncEventSourceMessage(const char * data, size_t len)
 
 AsyncEventSourceMessage::~AsyncEventSourceMessage() {
      if(_data != NULL)
-        free(_data);
+        //free(_data);
+       delete[] _data;
 }
 
 size_t AsyncEventSourceMessage::ack(size_t len, uint32_t time) {
@@ -157,8 +157,8 @@ AsyncEventSourceClient::AsyncEventSourceClient(AsyncWebServerRequest *request, A
   _client = request->client();
   _server = server;
   _lastId = 0;
-  if(request->hasHeader("Last-Event-ID"))
-    _lastId = atoi(request->getHeader("Last-Event-ID")->value().c_str());
+  if(request->hasHeader(F("Last-Event-ID")))
+    _lastId = atoi(request->getHeader(F("Last-Event-ID"))->value().c_str());
     
   _client->setRxTimeout(0);
   _client->onError(NULL, NULL);
@@ -332,7 +332,7 @@ bool AsyncEventSource::canHandle(AsyncWebServerRequest *request){
   if(request->method() != HTTP_GET || !request->url().equals(_url)) {
     return false;
   }
-  request->addInterestingHeader("Last-Event-ID");
+  request->addInterestingHeader(F("Last-Event-ID"));
   return true;
 }
 
@@ -347,10 +347,10 @@ void AsyncEventSource::handleRequest(AsyncWebServerRequest *request){
 AsyncEventSourceResponse::AsyncEventSourceResponse(AsyncEventSource *server){
   _server = server;
   _code = 200;
-  _contentType = "text/event-stream";
+  _contentType = F("text/event-stream");
   _sendContentLength = false;
-  addHeader("Cache-Control", "no-cache");
-  addHeader("Connection","keep-alive");
+  addHeader(F("Cache-Control"), F("no-cache"));
+  addHeader(F("Connection"),F("keep-alive"));
 }
 
 void AsyncEventSourceResponse::_respond(AsyncWebServerRequest *request){
