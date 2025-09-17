@@ -52,10 +52,10 @@ static String generateEventMessage(const char *message, const char *event, uint3
         size_t llen = ((char *)message + messageLen) - lineStart;
         std::unique_ptr<char[]> ldata(new char[llen + 1]);
         if(ldata != NULL){
-          memcpy(ldata, lineStart, llen);
+          memcpy(ldata.get(), lineStart, llen);
           ldata[llen] = 0;
           ev += F("data: ");
-          ev += ldata;
+          ev += ldata.get();
           ev += F("\r\n\r\n");
         }
         lineStart = (char *)message + messageLen;
@@ -86,10 +86,10 @@ static String generateEventMessage(const char *message, const char *event, uint3
         size_t llen = lineEnd - lineStart;
         std::unique_ptr<char[]> ldata(new char[llen + 1]);
         if(ldata != NULL){
-          memcpy(ldata, lineStart, llen);
+          memcpy(ldata.get(), lineStart, llen);
           ldata[llen] = 0;
           ev += F("data: ");
-          ev += ldata;
+          ev += ldata.get();
           ev += F("\r\n");
         }
         lineStart = nextLine;
