@@ -126,22 +126,28 @@ class AsyncCallbackWebHandler: public AsyncWebHandler {
     }
   
     virtual void handleRequest(AsyncWebServerRequest *request) override final {
-      if((_username != "" && _password != "") && !request->authenticate(_username.c_str(), _password.c_str()))
+#ifdef ASYNCWEBSERVER_AUTHENTICATION
+		if((_username != "" && _password != "") && !request->authenticate(_username.c_str(), _password.c_str()))
         return request->requestAuthentication();
+#endif		
       if(_onRequest)
         _onRequest(request);
       else
         request->send(500);
     }
     virtual void handleUpload(AsyncWebServerRequest *request, const String& filename, size_t index, uint8_t *data, size_t len, bool final) override final {
-      if((_username != "" && _password != "") && !request->authenticate(_username.c_str(), _password.c_str()))
+#ifdef ASYNCWEBSERVER_AUTHENTICATION
+		if((_username != "" && _password != "") && !request->authenticate(_username.c_str(), _password.c_str()))
         return request->requestAuthentication();
+#endif		
       if(_onUpload)
         _onUpload(request, filename, index, data, len, final);
     }
     virtual void handleBody(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) override final {
-      if((_username != "" && _password != "") && !request->authenticate(_username.c_str(), _password.c_str()))
+#ifdef ASYNCWEBSERVER_AUTHENTICATION
+		if((_username != "" && _password != "") && !request->authenticate(_username.c_str(), _password.c_str()))
         return request->requestAuthentication();
+#endif		
       if(_onBody)
         _onBody(request, data, len, index, total);
     }
