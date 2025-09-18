@@ -14,32 +14,54 @@ constexpr const char* JSON_MIMETYPE = "application/json";
 #endif
 
 #ifndef CHUNK_PROCESS_PERIOD_MS
-#define CHUNK_PROCESS_PERIOD_MS 3
+#define CHUNK_PROCESS_PERIOD_MS 5
 #endif
 
 class ChunkPrint : public Print {
+
 private:
     uint8_t* _destination;
     size_t _to_skip;
     size_t _to_write;
     size_t _pos;
+
 public:
     ChunkPrint(uint8_t* destination, size_t from, size_t len)
-        : _destination(destination), _to_skip(from), _to_write(len), _pos{ 0 } {}
-    virtual ~ChunkPrint() {}
-    size_t write(uint8_t c) {
+        : _destination(destination), _to_skip(from), _to_write(len), _pos(0) {}
+        
+    size_t write(uint8_t c) override {
         if (_to_skip > 0) {
             _to_skip--;
             return 1;
-        } else if (_to_write > 0) {
-            _to_write--;
-            _destination[_pos++] = c;
-            return 1;
         }
-        return 0;
+        
+        if (_to_write == 0) return 0;
+        
+        _destination[_pos++] = c;
+        _to_write--;
+        return 1;
     }
-    size_t write(const uint8_t *buffer, size_t size) {
-        return this->Print::write(buffer, size);
+    
+    size_t write(const uint8_t *buffer, size_t size) override {
+        if (_to_skip >= size) {
+            _to_skip -= size;
+            return size;
+        }
+        
+        if (_to_skip > 0) {
+            buffer += _to_skip;
+            size -= _to_skip;
+            _to_skip = 0;
+        }
+        
+        size_t to_copy = (size < _to_write) ? size : _to_write;
+        if (to_copy > 0) {
+            memcpy(_destination + _pos, buffer, to_copy);
+            _pos += to_copy;
+            _to_write -= to_copy;
+        }
+        
+        return to_copy + (size - to_copy); // Return actual written + skipped
     }
 };
 
@@ -83,12 +105,12 @@ private:
 
     size_t _contentLength;
     size_t _maxContentLength;
-    void* _tempObject;
+    std::unique_ptr<uint8_t[]> _tempBuffer;
     size_t _tempObjectSize;
 
 public:
     AsyncCallbackJsonWebHandler(const String& uri, JsonRequestHandlerFunction onRequest) 
-        : _uri(uri), _method(HTTP_POST | HTTP_PUT | HTTP_PATCH), _onRequest(onRequest), _maxContentLength(8096), _tempObject(nullptr), _tempObjectSize(0) {}
+        : _uri(uri), _method(HTTP_POST | HTTP_PUT | HTTP_PATCH), _onRequest(onRequest), _maxContentLength(8096), _tempBuffer(nullptr), _tempObjectSize(0) {}
 
     void setMethod(WebRequestMethodComposite method) { _method = method; }
     void setMaxContentLength(int maxContentLength) { _maxContentLength = maxContentLength; }
@@ -113,18 +135,33 @@ public:
 
     virtual void handleUpload(AsyncWebServerRequest *request, const String& filename, size_t index, uint8_t *data, size_t len, bool final) override final {}
 
-    virtual void handleBody(AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) override final {
-        if (_onRequest) {
-            _contentLength = total;
-            if (total > 0 && _tempObject == nullptr && total < _maxContentLength) {
-                _tempObject = malloc(total);
-                _tempObjectSize = total;
-            }
-            if (_tempObject != nullptr) {
-                memcpy(static_cast<uint8_t*>(_tempObject) + index, data, len);
-            }
+   virtual void handleBody(AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) override final {
+    if (!_onRequest) return;
+
+    _contentLength = total;
+    if (total == 0) return;
+
+    // Allocate buffer only once at the beginning using unique_ptr
+    if (!_tempBuffer) {
+        if (total > _maxContentLength) {
+            // Too large, skip allocation; handleRequest() will reply with 413
+            return;
         }
+        _tempBuffer.reset(new (std::nothrow) uint8_t[total]);
+        if (!_tempBuffer) {
+            _tempObjectSize = 0;
+            return;
+        }
+        _tempObjectSize = total;
     }
+
+    // Copy safely if within bounds
+    if (_tempBuffer && index + len <= _tempObjectSize) {
+        memcpy(_tempBuffer.get() + index, data, len);
+    } else {
+        // Out-of-bounds or allocation failure — ignore or log error
+    }
+}
     virtual bool isRequestHandlerTrivial() override final { return _onRequest ? false : true; }
 };
 
@@ -136,7 +173,7 @@ private:
 
     size_t _contentLength;
     size_t _maxContentLength;
-    void* _tempObject;
+    std::unique_ptr<uint8_t[]> _tempBuffer;
     size_t _tempObjectSize;
 
     AsyncWebServerRequest* _request;
@@ -144,85 +181,67 @@ private:
     Ticker _nextChunkTimer;
 
     void processNextChunk() {
-
 #ifdef ESP8266        
-        const size_t CHUNK_SIZE = CHUNK_OBJ_SIZE;  // Adjust chunk size
+        const size_t CHUNK_SIZE = CHUNK_OBJ_SIZE;
         if (_index < _tempObjectSize) {
             size_t chunkLen = (_index + CHUNK_SIZE < _tempObjectSize) ? CHUNK_SIZE : (_tempObjectSize - _index);
-            // Create a unique pointer for the chunk to manage its memory automatically
             std::unique_ptr<char[]> chunkObject(new char[chunkLen]);
-            memcpy(chunkObject.get(), static_cast<char*>(_tempObject) + _index, chunkLen);
-            // Create a gson::string to hold the raw JSON data chunk
+            memcpy(chunkObject.get(), _tempBuffer.get() + _index, chunkLen);
+
             gson::string rawJson;
             rawJson.addTextRaw(chunkObject.get(), chunkLen);
-            // Call the _onJsonStreamRequest handler with the chunk
             _onJsonStreamRequest(_request, rawJson);
-            // Move to the next chunk
+
             _index += chunkLen;
-            // Schedule the next chunk processing
-            _nextChunkTimer.once_ms(CHUNK_PROCESS_PERIOD_MS, [this]() {this->processNextChunk();});
+            _nextChunkTimer.once_ms(CHUNK_PROCESS_PERIOD_MS, [this]() { this->processNextChunk(); });
         } else {
-            // Reset tempObject pointer to release the memory
-            _tempObject = nullptr;
+            _tempBuffer.reset();
             _tempObjectSize = 0;
         }
-        #endif
-        #ifdef ESP32
+#endif
+
+#ifdef ESP32
         if (_tempObjectSize > 0) {
-        // Create a unique pointer for the entire data object
-        std::unique_ptr<char[]> fullObject(new char[_tempObjectSize]);
-        memcpy(fullObject.get(), _tempObject, _tempObjectSize);
-        // Create a gson::string to hold the raw JSON data
-        gson::string rawJson;
-        rawJson.addTextRaw(fullObject.get(), _tempObjectSize);
-        // Call the _onJsonStreamRequest handler with the full object
-        _onJsonStreamRequest(_request, rawJson);
-        // Reset tempObject pointer to release the memory
-        _tempObject = nullptr;
-        _tempObjectSize = 0;
-        }else{
-         // (e.g., log a warning or error if necessary)   
+            std::unique_ptr<char[]> fullObject(new char[_tempObjectSize]);
+            memcpy(fullObject.get(), _tempBuffer.get(), _tempObjectSize);
+
+            gson::string rawJson;
+            rawJson.addTextRaw(fullObject.get(), _tempObjectSize);
+            _onJsonStreamRequest(_request, rawJson);
+
+            _tempBuffer.reset();
+            _tempObjectSize = 0;
         }
-        #endif
+#endif
     }
 
 public:
-    AsyncJsonStreamCallback(const String& uri, JsonStreamHandlerFunction onRequest) 
-        : _uri(uri), _method(HTTP_POST | HTTP_PUT | HTTP_PATCH), _onJsonStreamRequest(onRequest), _maxContentLength(16384), _tempObject(nullptr), _tempObjectSize(0) {}
-    
+    AsyncJsonStreamCallback(const String& uri, JsonStreamHandlerFunction onRequest)
+        : _uri(uri), _method(HTTP_POST | HTTP_PUT | HTTP_PATCH), _onJsonStreamRequest(onRequest), _maxContentLength(16384), _tempBuffer(nullptr), _tempObjectSize(0) {}
+
     void setMethod(WebRequestMethodComposite method) { _method = method; }
     void setMaxContentLength(int maxContentLength) { _maxContentLength = maxContentLength; }
     void onRequest2(JsonStreamHandlerFunction fn) { _onJsonStreamRequest = fn; }
 
     virtual bool canHandle(AsyncWebServerRequest *request) override final {
-        if (!_onJsonStreamRequest)
-            return false;
-
-        if (!(_method & request->method()))
-            return false;
-
-        if (_uri.length() && (_uri != request->url() && !request->url().startsWith(_uri + "/")))
-            return false;
-
-        if (!request->contentType().equalsIgnoreCase(JSON_MIMETYPE))
-            return false;
-
+        if (!_onJsonStreamRequest) return false;
+        if (!(_method & request->method())) return false;
+        if (_uri.length() && (_uri != request->url() && !request->url().startsWith(_uri + "/"))) return false;
+        if (!request->contentType().equalsIgnoreCase(JSON_MIMETYPE)) return false;
         request->addInterestingHeader("ANY");
         return true;
     }
 
     virtual void handleRequest(AsyncWebServerRequest *request) override final {
         if (_onJsonStreamRequest) {
-            if (_tempObject != nullptr && _tempObjectSize > 0) {
+            if (_tempBuffer && _tempObjectSize > 0) {
                 _request = request;
                 _index = 0;
-                processNextChunk();  // Start processing the first chunk
+                processNextChunk();
             } else {
-                // No temporary object to process
                 request->send(_contentLength > _maxContentLength ? 413 : 400);
             }
         } else {
-            // No request handler defined
             request->send(500);
         }
     }
@@ -230,15 +249,18 @@ public:
     virtual void handleUpload(AsyncWebServerRequest *request, const String& filename, size_t index, uint8_t *data, size_t len, bool final) override final {}
 
     virtual void handleBody(AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) override final {
-        if (_onJsonStreamRequest) {
-            _contentLength = total;
-            if (total > 0 && _tempObject == nullptr && total < _maxContentLength) {
-                _tempObject = malloc(total);
-                _tempObjectSize = total;
-            }
-            if (_tempObject != nullptr) {
-                memcpy(static_cast<uint8_t*>(_tempObject) + index, data, len);
-            }
+        _contentLength = total;
+        if (total == 0) return;
+
+        if (!_tempBuffer) {
+            if (total > _maxContentLength) return;
+            _tempBuffer.reset(new (std::nothrow) uint8_t[total]);
+            if (!_tempBuffer) { _tempObjectSize = 0; return; }
+            _tempObjectSize = total;
+        }
+
+        if (_tempBuffer && index + len <= _tempObjectSize) {
+            memcpy(_tempBuffer.get() + index, data, len);
         }
     }
 
