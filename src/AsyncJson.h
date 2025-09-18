@@ -166,14 +166,10 @@ protected:
 
     bool allocateBuffer(size_t size) {
         if (size > _maxContentLength) return false;
-        
         if (!_buffer || _bufferSize < size) {
-            _buffer.reset(static_cast<uint8_t*>(malloc(size)));
-            if (!_buffer.get()) {
-                _bufferSize = 0;
-                _bufferReady = false;
-                return false;
-            }
+            auto tmp = static_cast<uint8_t*>(malloc(size));
+            if (!tmp) return false;
+            _buffer.reset(tmp);
             _bufferSize = size;
         }
         _bufferReady = true;
