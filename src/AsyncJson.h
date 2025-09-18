@@ -168,7 +168,6 @@ protected:
         if (size > _maxContentLength) return false;
         
         if (!_buffer || _bufferSize < size) {
-            // Use malloc instead of new for ESP8266 compatibility
             _buffer.reset(static_cast<uint8_t*>(malloc(size)));
             if (!_buffer.get()) {
                 _bufferSize = 0;
@@ -246,7 +245,7 @@ public:
             return;
         }
 
-        // Parse JSON with proper error handling using GSON API
+        // Parse JSON with proper error
         gson::Parser parser;
         bool parseSuccess = parser.parse(reinterpret_cast<char*>(_buffer.get()), _contentLength);
 
@@ -269,7 +268,6 @@ public:
     bool isRequestHandlerTrivial() override final { return !_onRequest; }
 };
 
-// Optimized streaming JSON handler
 class AsyncJsonStreamCallback : public AsyncJsonHandlerBase {
 public:
     using JsonStreamHandlerFunction = std::function<void(AsyncWebServerRequest*, gson::string&)>;
@@ -364,7 +362,7 @@ public:
 };
 
 // Type aliases for backward compatibility
-using JsonRequestHandlerFunction = AsyncCallbackJsonWebHandler::JsonRequestHandlerFunction;
-using JsonStreamHandlerFunction = AsyncJsonStreamCallback::JsonStreamHandlerFunction;
+using JsonRequestHandlerFunction    = AsyncCallbackJsonWebHandler::JsonRequestHandlerFunction;
+using JsonStreamHandlerFunction     = AsyncJsonStreamCallback::JsonStreamHandlerFunction;
 
 #endif // ASYNC_JSON_H_
