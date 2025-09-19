@@ -3,17 +3,22 @@
 
 #include <Arduino.h>
 #include <Print.h>
+#include <StringUtils.h>
 #include <ESPAsyncWebServer.h>
 #include <GSON.h>
-#include <Ticker.h>
 #include <memory>
 #include <functional>
-#include <stdlib.h>
+
+#ifdef ESP8266
+#include <Ticker.h>
+#elif defined(ESP32)
+#include <esp_timer.h>
+#endif
 
 constexpr const char* JSON_MIMETYPE = "application/json";
 
 #ifndef CHUNK_OBJ_SIZE
-#define CHUNK_OBJ_SIZE 1024 
+#define CHUNK_OBJ_SIZE 512
 #endif
 
 #ifndef CHUNK_PROCESS_PERIOD_MS
@@ -25,46 +30,71 @@ constexpr const char* JSON_MIMETYPE = "application/json";
 #endif
 
 // ---------------------------
-// Chunked Print for writing JSON
+// Memory management utilities
+// ---------------------------
+struct MallocDeleter {
+    void operator()(uint8_t* ptr) const noexcept { 
+        if (ptr) free(ptr); 
+    }
+};
+
+// ---------------------------
+// Improved ChunkPrint with bounds checking
 // ---------------------------
 class ChunkPrint : public Print {
 private:
     uint8_t* _destination;
-    size_t _offset;
-    size_t _remaining;
-    size_t _position;
+    size_t _to_skip;
+    size_t _to_write;
+    size_t _pos;
+    size_t _max_size;  // Added for bounds checking
 
 public:
-    ChunkPrint(uint8_t* destination, size_t offset, size_t length) noexcept
-        : _destination(destination), _offset(offset), _remaining(length), _position(0) {}
+    ChunkPrint(uint8_t* destination, size_t from, size_t len, size_t max_size) noexcept
+        : _destination(destination), _to_skip(from), _to_write(len), _pos(0), _max_size(max_size) {}
 
-    size_t write(uint8_t byte) override {
-        if (_offset > 0) { --_offset; return 1; }
-        if (_remaining == 0) return 0;
-        _destination[_position++] = byte;
-        --_remaining;
-        return 1;
+    size_t write(uint8_t c) override {
+        if (_to_skip > 0) {
+            _to_skip--;
+            return 1;
+        }
+        if (_to_write > 0 && _pos < _max_size) {
+            _destination[_pos++] = c;
+            _to_write--;
+            return 1;
+        }
+        return 0;
     }
 
     size_t write(const uint8_t* buffer, size_t size) override {
         if (!buffer || size == 0) return 0;
-        if (_offset >= size) { _offset -= size; return size; }
-        if (_offset > 0) { buffer += _offset; size -= _offset; _offset = 0; }
-        const size_t copySize = std::min(size, _remaining);
-        if (copySize > 0) {
-            memcpy(_destination + _position, buffer, copySize);
-            _position += copySize;
-            _remaining -= copySize;
+        
+        // Skip bytes if needed
+        if (_to_skip > 0) {
+            const size_t skip_amount = std::min(_to_skip, size);
+            _to_skip -= skip_amount;
+            buffer += skip_amount;
+            size -= skip_amount;
+            if (size == 0) return skip_amount;
         }
-        return size;
+
+        // Write remaining bytes with bounds checking
+        const size_t available_space = std::min({_to_write, _max_size - _pos, size});
+        if (available_space > 0) {
+            memcpy(_destination + _pos, buffer, available_space);
+            _pos += available_space;
+            _to_write -= available_space;
+        }
+        
+        return size;  // Return original size to maintain compatibility
     }
 
-    size_t getWrittenBytes() const noexcept { return _position; }
-    size_t getRemainingBytes() const noexcept { return _remaining; }
+    size_t getWrittenBytes() const noexcept { return _pos; }
+    size_t getRemainingSpace() const noexcept { return _to_write; }
 };
 
 // ---------------------------
-// Async JSON Response
+// Improved AsyncJsonResponse with better error handling
 // ---------------------------
 class AsyncJsonResponse : public AsyncAbstractResponse {
 private:
@@ -80,8 +110,11 @@ public:
 
     ~AsyncJsonResponse() = default;
 
+    // Move constructor and assignment
     AsyncJsonResponse(AsyncJsonResponse&& other) noexcept 
-        : AsyncAbstractResponse(std::move(other)), _jsonBuffer(std::move(other._jsonBuffer)), _isValid(other._isValid) {
+        : AsyncAbstractResponse(std::move(other)), 
+          _jsonBuffer(std::move(other._jsonBuffer)), 
+          _isValid(other._isValid) {
         other._isValid = false;
     }
 
@@ -111,25 +144,21 @@ public:
 protected:
     size_t _fillBuffer(uint8_t* data, size_t len) override {
         if (!data || len == 0 || !_isValid) return 0;
-        const size_t jsonSize = _jsonBuffer.s.length();
-        if (_sentLength >= jsonSize) return 0;
-        ChunkPrint dest(data, 0, len);
-        const size_t remainingData = jsonSize - _sentLength;
-        const size_t bytesToWrite = std::min(len, remainingData);
-        dest.write(reinterpret_cast<const uint8_t*>(_jsonBuffer.s.c_str() + _sentLength), bytesToWrite);
+        
+        const size_t json_size = _jsonBuffer.s.length();
+        if (_sentLength >= json_size) return 0;
+
+        ChunkPrint dest(data, 0, len, len);
+        const size_t remaining = json_size - _sentLength;
+        const size_t to_write = std::min(len, remaining);
+        
+        dest.write(reinterpret_cast<const uint8_t*>(_jsonBuffer.s.c_str() + _sentLength), to_write);
         return dest.getWrittenBytes();
     }
 };
 
 // ---------------------------
-// Malloc Deleter
-// ---------------------------
-struct MallocDeleter {
-    void operator()(uint8_t* ptr) const { if (ptr) free(ptr); }
-};
-
-// ---------------------------
-// Base JSON handler
+// Base class with improved safety
 // ---------------------------
 class AsyncJsonHandlerBase : public AsyncWebHandler {
 protected:
@@ -137,31 +166,38 @@ protected:
     WebRequestMethodComposite _method;
     size_t _maxContentLength;
     size_t _contentLength;
-    std::unique_ptr<uint8_t[], MallocDeleter> _buffer;
-    size_t _bufferSize;
+    std::unique_ptr<uint8_t[], MallocDeleter> _tempObject;
+    size_t _tempObjectSize;
     bool _bufferReady;
 
-    bool validateRequest(AsyncWebServerRequest* request) const {
+    bool validateRequest(AsyncWebServerRequest* request) const noexcept {
+        if (!request) return false;
         if (!(_method & request->method())) return false;
         if (_uri.length() && (_uri != request->url() && !request->url().startsWith(_uri + "/"))) return false;
         if (!request->contentType().equalsIgnoreCase(JSON_MIMETYPE)) return false;
         return true;
     }
 
-    bool allocateBuffer(size_t size) {
-        if (size > _maxContentLength) return false;
-        if (!_buffer || _bufferSize < size) {
-            _buffer.reset(static_cast<uint8_t*>(malloc(size)));
-            if (!_buffer.get()) { _bufferSize = 0; _bufferReady = false; return false; }
-            _bufferSize = size;
+    bool allocateBuffer(size_t size) noexcept {
+        if (size == 0 || size > _maxContentLength) return false;
+        
+        if (!_tempObject || _tempObjectSize < size) {
+            _tempObject.reset(static_cast<uint8_t*>(malloc(size)));
+            if (!_tempObject) {
+                _tempObjectSize = 0;
+                _bufferReady = false;
+                return false;
+            }
+            _tempObjectSize = size;
         }
         _bufferReady = true;
         return true;
     }
 
 public:
-    AsyncJsonHandlerBase(const String& uri, WebRequestMethodComposite method = HTTP_POST | HTTP_PUT | HTTP_PATCH)
-        : _uri(uri), _method(method), _maxContentLength(MAX_JSON_CONTENT_LENGTH), _contentLength(0), _bufferSize(0), _bufferReady(false) {}
+    AsyncJsonHandlerBase(const String& uri, WebRequestMethodComposite method = HTTP_POST | HTTP_PUT | HTTP_PATCH) noexcept
+        : _uri(uri), _method(method), _maxContentLength(MAX_JSON_CONTENT_LENGTH), 
+          _contentLength(0), _tempObjectSize(0), _bufferReady(false) {}
 
     virtual ~AsyncJsonHandlerBase() = default;
 
@@ -171,15 +207,22 @@ public:
     void handleUpload(AsyncWebServerRequest*, const String&, size_t, uint8_t*, size_t, bool) override final {}
 
     void handleBody(AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) override final {
+        if (!request || !data || len == 0) return;
+        
         _contentLength = total;
-        if (total == 0 || !data || len == 0) return;
-        if (!_buffer && !allocateBuffer(total)) return;
-        if (index + len <= _bufferSize) memcpy(_buffer.get() + index, data, len);
+        if (total > _maxContentLength) return;  // Will be handled in handleRequest
+
+        if (!_tempObject && !allocateBuffer(total)) return;
+
+        // Bounds checking for memcpy
+        if (_tempObject && (index + len) <= _tempObjectSize) {
+            memcpy(_tempObject.get() + index, data, len);
+        }
     }
 };
 
 // ---------------------------
-// Callback-based JSON handler
+// Improved AsyncCallbackJsonWebHandler
 // ---------------------------
 class AsyncCallbackJsonWebHandler : public AsyncJsonHandlerBase {
 public:
@@ -189,40 +232,58 @@ private:
     JsonRequestHandlerFunction _onRequest;
 
 public:
-    AsyncCallbackJsonWebHandler(const String& uri, JsonRequestHandlerFunction onRequest)
+    AsyncCallbackJsonWebHandler(const String& uri, JsonRequestHandlerFunction onRequest) noexcept
         : AsyncJsonHandlerBase(uri), _onRequest(std::move(onRequest)) {}
 
     void onRequest(JsonRequestHandlerFunction fn) { _onRequest = std::move(fn); }
 
     bool canHandle(AsyncWebServerRequest* request) override final {
-        if (!_onRequest) return false;
-        if (!validateRequest(request)) return false;
+        if (!_onRequest || !validateRequest(request)) return false;
         request->addInterestingHeader(F("ANY"));
         return true;
     }
 
     void handleRequest(AsyncWebServerRequest* request) override final {
-        if (!_onRequest) { request->send(500, F("text/plain"), F("No handler configured")); return; }
-        if (_contentLength > _maxContentLength) { request->send(413, F("text/plain"), F("Content too large")); return; }
-        if (!_bufferReady || !_buffer) { request->send(400, F("text/plain"), F("Invalid request body")); return; }
+        if (!_onRequest) {
+            request->send(500, F("text/plain"), F("No handler configured"));
+            return;
+        }
 
+        if (_contentLength > _maxContentLength) {
+            request->send(413, F("text/plain"), F("Content too large"));
+            return;
+        }
+
+        if (!_bufferReady || !_tempObject || _contentLength == 0) {
+            request->send(400, F("text/plain"), F("Invalid request body"));
+            return;
+        }
+
+        // Parse JSON with error handling
         gson::Parser parser;
-        if (!parser.parse(reinterpret_cast<char*>(_buffer.get()), _contentLength) || parser.hasError()) {
+        if (!parser.parse(reinterpret_cast<char*>(_tempObject.get()), _contentLength) || parser.hasError()) {
             request->send(400, F("text/plain"), F("Invalid JSON"));
-            _bufferReady = false;
+            cleanup();
             return;
         }
 
         gson::Entry jsonRoot = parser.get(0);
         _onRequest(request, jsonRoot);
-        _bufferReady = false;
+        cleanup();
     }
 
     bool isRequestHandlerTrivial() override final { return !_onRequest; }
+
+private:
+    void cleanup() noexcept {
+        _bufferReady = false;
+        _tempObject.reset();
+        _tempObjectSize = 0;
+    }
 };
 
 // ---------------------------
-// Chunked JSON stream handler
+// Improved AsyncJsonStreamCallback
 // ---------------------------
 class AsyncJsonStreamCallback : public AsyncJsonHandlerBase {
 public:
@@ -234,73 +295,172 @@ private:
     size_t _processIndex;
 
 #ifdef ESP8266
-    Ticker _chunkTimer;
+    Ticker _nextChunkTimer;
+#elif defined(ESP32)
+    esp_timer_handle_t _chunkTimer;
+    bool _timerInitialized;
 #endif
 
-    void cleanup() {
+    void cleanup() noexcept {
         _currentRequest = nullptr;
         _processIndex = 0;
         _bufferReady = false;
+        _tempObject.reset();
+        _tempObjectSize = 0;
+
 #ifdef ESP8266
-        _chunkTimer.detach();
+        _nextChunkTimer.detach();
+#elif defined(ESP32)
+        if (_timerInitialized && _chunkTimer) {
+            esp_timer_stop(_chunkTimer);
+            _timerInitialized = false;
+        }
 #endif
     }
 
-#ifdef ESP8266
+#if defined(ESP8266) || defined(ESP32)
     void processNextChunk() {
-        if (!_currentRequest || !_buffer || _processIndex >= _contentLength) { cleanup(); return; }
+        if (!_currentRequest || !_tempObject || _processIndex >= _tempObjectSize) {
+            cleanup();
+            return;
+        }
 
-        const size_t chunkSize = std::min((size_t)CHUNK_OBJ_SIZE, _contentLength - _processIndex);
+        const size_t chunk_size = std::min((size_t)CHUNK_OBJ_SIZE, _tempObjectSize - _processIndex);
+        if (chunk_size == 0) {
+            cleanup();
+            return;
+        }
 
-        if (chunkSize > 0) {
-            gson::string rawJson;
-            rawJson.addTextRaw(reinterpret_cast<char*>(_buffer.get() + _processIndex), chunkSize);
-            _onJsonStreamRequest(_currentRequest, rawJson);
-            _processIndex += chunkSize;
-
-            if (_processIndex < _contentLength) {
-                _chunkTimer.once_ms(CHUNK_PROCESS_PERIOD_MS, [this]() { processNextChunk(); });
-            } else {
-                cleanup();
+        // Use malloc for ESP8266/ESP32 compatibility
+        char* chunk_data = static_cast<char*>(malloc(chunk_size));
+        if (!chunk_data) {
+            // Handle memory allocation failure
+            if (_currentRequest) {
+                _currentRequest->send(500, F("text/plain"), F("Memory allocation failed"));
             }
+            cleanup();
+            return;
+        }
+
+        memcpy(chunk_data, _tempObject.get() + _processIndex, chunk_size);
+
+        gson::string rawJson;
+        rawJson.addTextRaw(chunk_data, chunk_size);
+
+        // Free the chunk memory immediately after use
+        free(chunk_data);
+
+        _onJsonStreamRequest(_currentRequest, rawJson);
+        _processIndex += chunk_size;
+
+        if (_processIndex < _tempObjectSize) {
+            scheduleNextChunk();
         } else {
             cleanup();
         }
     }
-#endif // ESP8266
+
+    void scheduleNextChunk() {
+#ifdef ESP8266
+        _nextChunkTimer.once_ms(CHUNK_PROCESS_PERIOD_MS, [this]() { processNextChunk(); });
+#elif defined(ESP32)
+        if (_timerInitialized) {
+            esp_timer_start_once(_chunkTimer, CHUNK_PROCESS_PERIOD_MS * 1000);
+        }
+#endif
+    }
+
+#ifdef ESP32
+    static void timerCallback(void* arg) {
+        if (arg) {
+            static_cast<AsyncJsonStreamCallback*>(arg)->processNextChunk();
+        }
+    }
+
+    bool initializeTimer() noexcept {
+        if (_timerInitialized) return true;
+
+        const esp_timer_create_args_t timer_args = {
+            .callback = &timerCallback,
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "json_chunk_timer",
+            .skip_unhandled_events = false
+        };
+
+        esp_err_t result = esp_timer_create(&timer_args, &_chunkTimer);
+        if (result == ESP_OK) {
+            _timerInitialized = true;
+            return true;
+        }
+        return false;
+    }
+#endif // ESP32
+#endif // ESP8266 || ESP32
 
 public:
-    AsyncJsonStreamCallback(const String& uri, JsonStreamHandlerFunction onRequest)
-        : AsyncJsonHandlerBase(uri), 
-          _onJsonStreamRequest(std::move(onRequest)), 
-          _currentRequest(nullptr), 
-          _processIndex(0) {}
+    AsyncJsonStreamCallback(const String& uri, JsonStreamHandlerFunction onRequest) noexcept
+        : AsyncJsonHandlerBase(uri), _onJsonStreamRequest(std::move(onRequest)), 
+          _currentRequest(nullptr), _processIndex(0) {
+#ifdef ESP32
+        _chunkTimer = nullptr;
+        _timerInitialized = false;
+#endif
+    }
 
-    ~AsyncJsonStreamCallback() { cleanup(); }
+    ~AsyncJsonStreamCallback() {
+        cleanup();
+#ifdef ESP32
+        if (_timerInitialized && _chunkTimer) {
+            esp_timer_delete(_chunkTimer);
+        }
+#endif
+    }
 
     void onRequest(JsonStreamHandlerFunction fn) { _onJsonStreamRequest = std::move(fn); }
 
     bool canHandle(AsyncWebServerRequest* request) override final {
-        if (!_onJsonStreamRequest) return false;
-        if (!validateRequest(request)) return false;
+        if (!_onJsonStreamRequest || !validateRequest(request)) return false;
         request->addInterestingHeader(F("ANY"));
         return true;
     }
 
     void handleRequest(AsyncWebServerRequest* request) override final {
-        if (!_onJsonStreamRequest) { request->send(500, F("text/plain"), F("No handler configured")); return; }
-        if (_contentLength > _maxContentLength) { request->send(413, F("text/plain"), F("Content too large")); return; }
-        if (!_bufferReady || !_buffer || _contentLength == 0) { request->send(400, F("text/plain"), F("Invalid request body")); return; }
+        if (!_onJsonStreamRequest) {
+            request->send(500, F("text/plain"), F("No handler configured"));
+            return;
+        }
+
+        if (_contentLength > _maxContentLength) {
+            request->send(413, F("text/plain"), F("Content too large"));
+            return;
+        }
+
+        if (!_bufferReady || !_tempObject || _tempObjectSize == 0) {
+            request->send(400, F("text/plain"), F("Invalid request body"));
+            return;
+        }
 
         _currentRequest = request;
         _processIndex = 0;
 
 #ifdef ESP8266
         processNextChunk();
+#elif defined(ESP32)
+        if (!initializeTimer()) {
+            request->send(500, F("text/plain"), F("Timer initialization failed"));
+            cleanup();
+            return;
+        }
+        processNextChunk();
 #else
+        // Fallback for other platforms - process entire payload
         gson::string rawJson;
-        rawJson.addTextRaw(reinterpret_cast<char*>(_buffer.get()), _contentLength);
-        _onJsonStreamRequest(_currentRequest, rawJson);
+        if (rawJson.addTextRaw(reinterpret_cast<char*>(_tempObject.get()), _tempObjectSize)) {
+            _onJsonStreamRequest(_currentRequest, rawJson);
+        } else {
+            request->send(500, F("text/plain"), F("Memory allocation failed"));
+        }
         cleanup();
 #endif
     }
@@ -309,9 +469,9 @@ public:
 };
 
 // ---------------------------
-// Type aliases for backward compatibility
+// Type aliases for compatibility
 // ---------------------------
-using JsonRequestHandlerFunction    = AsyncCallbackJsonWebHandler::JsonRequestHandlerFunction;
-using JsonStreamHandlerFunction     = AsyncJsonStreamCallback::JsonStreamHandlerFunction;
+using JsonRequestHandlerFunction = AsyncCallbackJsonWebHandler::JsonRequestHandlerFunction;
+using JsonStreamHandlerFunction = AsyncJsonStreamCallback::JsonStreamHandlerFunction;
 
 #endif // ASYNC_JSON_H_
