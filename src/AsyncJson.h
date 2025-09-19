@@ -232,13 +232,25 @@ private:
     JsonStreamHandlerFunction _onJsonStreamRequest;
     AsyncWebServerRequest* _currentRequest;
     size_t _processIndex;
-    Ticker _chunkTimer;
 
+#ifdef ESP8266
+    Ticker _chunkTimer;
+#endif
+
+    void cleanup() {
+        _currentRequest = nullptr;
+        _processIndex = 0;
+        _bufferReady = false;
+#ifdef ESP8266
+        _chunkTimer.detach();
+#endif
+    }
+
+#ifdef ESP8266
     void processNextChunk() {
-#ifdef ESP8266        
         if (!_currentRequest || !_buffer || _processIndex >= _contentLength) { cleanup(); return; }
 
-        const size_t chunkSize = min((size_t)CHUNK_OBJ_SIZE, _contentLength - _processIndex);
+        const size_t chunkSize = std::min((size_t)CHUNK_OBJ_SIZE, _contentLength - _processIndex);
 
         if (chunkSize > 0) {
             gson::string rawJson;
@@ -248,26 +260,21 @@ private:
 
             if (_processIndex < _contentLength) {
                 _chunkTimer.once_ms(CHUNK_PROCESS_PERIOD_MS, [this]() { processNextChunk(); });
-            } else cleanup();
-        } else cleanup();
-    }
-#else
-            // ---- ESP32: process all at once ----
-            gson::string rawJson;
-            rawJson.addTextRaw(reinterpret_cast<char*>(_buffer.get()), _contentLength);
-            _onJsonStreamRequest(_currentRequest, rawJson);
+            } else {
+                cleanup();
+            }
+        } else {
             cleanup();
-#endif
-    void cleanup() {
-        _currentRequest = nullptr;
-        _processIndex = 0;
-        _bufferReady = false;
-        _chunkTimer.detach();
+        }
     }
+#endif // ESP8266
 
 public:
     AsyncJsonStreamCallback(const String& uri, JsonStreamHandlerFunction onRequest)
-        : AsyncJsonHandlerBase(uri), _onJsonStreamRequest(std::move(onRequest)), _currentRequest(nullptr), _processIndex(0) {}
+        : AsyncJsonHandlerBase(uri), 
+          _onJsonStreamRequest(std::move(onRequest)), 
+          _currentRequest(nullptr), 
+          _processIndex(0) {}
 
     ~AsyncJsonStreamCallback() { cleanup(); }
 
@@ -287,7 +294,15 @@ public:
 
         _currentRequest = request;
         _processIndex = 0;
+
+#ifdef ESP8266
         processNextChunk();
+#else
+        gson::string rawJson;
+        rawJson.addTextRaw(reinterpret_cast<char*>(_buffer.get()), _contentLength);
+        _onJsonStreamRequest(_currentRequest, rawJson);
+        cleanup();
+#endif
     }
 
     bool isRequestHandlerTrivial() override final { return !_onJsonStreamRequest; }
